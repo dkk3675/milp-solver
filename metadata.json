@@ -1,0 +1,6 @@
+{
+  "name": "Consulting Resource Optimization",
+  "description": "Interactive decision support system for optimal consulting resource allocation and Principal PM assignment using Mixed-Integer Linear Programming.",
+  "requestFramePermissions": [],
+  "majorCapabilities": ["MAJOR_CAPABILITY_SERVER_SIDE_GEMINI_API"]
+}
