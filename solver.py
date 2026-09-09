@@ -1,14 +1,14 @@
 """
 Mathematical Optimization Solver Engine
 Solves the Mixed-Integer Linear Programming (MILP) Model for Consulting Resource Allocation.
-Supports PuLP (CBC), SciPy (HiGHS/milp), and Gurobi/CPLEX if available.
+Exclusively uses IBM ILOG CPLEX Optimizer (DOcplex Python API).
 """
 
 import time
-from typing import Dict, Any, Tuple, Optional, List
+from typing import Dict, Any, Tuple, List
 import pandas as pd
-import numpy as np
-import pulp
+import docplex.mp.model as cpx_model
+import cplex
 
 def validate_parameters(
     client_df: pd.DataFrame,
@@ -63,10 +63,11 @@ def solve_consulting_allocation(
     billing_df: pd.DataFrame,
     costs_df: pd.DataFrame,
     capacities_df: pd.DataFrame,
-    solver_name: str = "PuLP (CBC)"
+    solver_name: str = "IBM ILOG CPLEX"
 ) -> Dict[str, Any]:
     """
-    Formulates and solves the consulting resource allocation optimization problem.
+    Formulates and solves the consulting resource allocation optimization problem
+    strictly using IBM ILOG CPLEX Optimizer via docplex.
     """
     start_time = time.time()
     
@@ -78,7 +79,8 @@ def solve_consulting_allocation(
             "optimal": False,
             "objective_value": 0.0,
             "errors": validation_errors,
-            "solve_time": time.time() - start_time
+            "solve_time": time.time() - start_time,
+            "solver_used": "IBM ILOG CPLEX Optimizer"
         }
 
     # Extract Sets
@@ -116,99 +118,105 @@ def solve_consulting_allocation(
     for cid in clients:
         margins[cid] = {c: rates[cid][c] - costs[cid][c] for c in consultants}
 
-    # --- PuLP Formulation ---
-    prob = pulp.LpProblem("Consulting_Resource_Allocation", pulp.LpMaximize)
+    # --- IBM ILOG CPLEX Formulation ---
+    mdl = cpx_model.Model(name="Consulting_Resource_Allocation_CPLEX")
     
     # Decision Variables
     # x_ij >= 0: continuous hours consultant i works for client j
-    x = pulp.LpVariable.dicts(
-        "x",
-        ((i, j) for i in consultants for j in clients),
-        lowBound=0,
-        cat="Continuous"
-    )
+    x = {
+        (i, j): mdl.continuous_var(lb=0.0, name=f"x_{i}_{j}")
+        for i in consultants for j in clients
+    }
     
     # y_ij in {0, 1}: binary indicator if consultant i works for client j
-    y = pulp.LpVariable.dicts(
-        "y",
-        ((i, j) for i in consultants for j in clients),
-        cat="Binary"
-    )
+    y = {
+        (i, j): mdl.binary_var(name=f"y_{i}_{j}")
+        for i in consultants for j in clients
+    }
     
     # p_ij in {0, 1}: binary indicator if consultant i is Principal PM for client j
-    p = pulp.LpVariable.dicts(
-        "p",
-        ((i, j) for i in consultants for j in clients),
-        cat="Binary"
-    )
+    p = {
+        (i, j): mdl.binary_var(name=f"p_{i}_{j}")
+        for i in consultants for j in clients
+    }
     
-    # Objective: Maximize Z = sum_i sum_j (R_ij - C_ij) * x_ij
-    prob += pulp.lpSum(margins[j][i] * x[(i, j)] for i in consultants for j in clients), "Total_Contribution_Margin"
+    # Objective Function: Maximize Z = sum_i sum_j (R_ij - C_ij) * x_ij
+    objective_expr = mdl.sum(margins[j][i] * x[(i, j)] for i in consultants for j in clients)
+    mdl.maximize(objective_expr)
     
     # 1. Consultant capacity: sum_j x_ij <= Cap_i
     for i in consultants:
-        prob += pulp.lpSum(x[(i, j)] for j in clients) <= capacities[i], f"Capacity_{i}"
+        mdl.add_constraint(
+            mdl.sum(x[(i, j)] for j in clients) <= capacities[i],
+            ctname=f"Capacity_{i}"
+        )
         
     # 2. Client requirements: sum_i x_ij = H_j
     for j in clients:
-        prob += pulp.lpSum(x[(i, j)] for i in consultants) == req_hours[j], f"Demand_{j}"
+        mdl.add_constraint(
+            mdl.sum(x[(i, j)] for i in consultants) == req_hours[j],
+            ctname=f"Demand_{j}"
+        )
         
     # 3. Required expertise: x_ij >= S_ij
     for i in consultants:
         for j in clients:
             if expertise_min[j][i] > 0:
-                prob += x[(i, j)] >= expertise_min[j][i], f"ExpertiseMin_{i}_{j}"
+                mdl.add_constraint(
+                    x[(i, j)] >= expertise_min[j][i],
+                    ctname=f"ExpertiseMin_{i}_{j}"
+                )
                 
     # 4. Assignment linkage: x_ij <= H_j * y_ij (Big-M with M = H_j)
     for i in consultants:
         for j in clients:
-            prob += x[(i, j)] <= req_hours[j] * y[(i, j)], f"Linkage_{i}_{j}"
+            mdl.add_constraint(
+                x[(i, j)] <= req_hours[j] * y[(i, j)],
+                ctname=f"Linkage_{i}_{j}"
+            )
             
     # 5. Exactly one PM per client: sum_i p_ij = 1
     for j in clients:
-        prob += pulp.lpSum(p[(i, j)] for i in consultants) == 1, f"OnePM_{j}"
+        mdl.add_constraint(
+            mdl.sum(p[(i, j)] for i in consultants) == 1,
+            ctname=f"OnePM_{j}"
+        )
         
     # 6. PM must work: p_ij <= y_ij
     for i in consultants:
         for j in clients:
-            prob += p[(i, j)] <= y[(i, j)], f"PMWork_{i}_{j}"
+            mdl.add_constraint(
+                p[(i, j)] <= y[(i, j)],
+                ctname=f"PMWork_{i}_{j}"
+            )
             
     # 7. PM minimum hours: x_ij >= PM_j * p_ij
     for i in consultants:
         for j in clients:
-            prob += x[(i, j)] >= pm_min[j] * p[(i, j)], f"PMMinHours_{i}_{j}"
+            mdl.add_constraint(
+                x[(i, j)] >= pm_min[j] * p[(i, j)],
+                ctname=f"PMMinHours_{i}_{j}"
+            )
 
-    # Solver selection
-    if "Gurobi" in solver_name:
-        try:
-            solver = pulp.GUROBI_CMD(msg=False)
-            prob.solve(solver)
-        except Exception:
-            prob.solve(pulp.PULP_CBC_CMD(msg=False))
-    elif "CPLEX" in solver_name:
-        try:
-            solver = pulp.CPLEX_CMD(msg=False)
-            prob.solve(solver)
-        except Exception:
-            prob.solve(pulp.PULP_CBC_CMD(msg=False))
-    else:
-        # Default PuLP CBC solver
-        solver = pulp.PULP_CBC_CMD(msg=False)
-        prob.solve(solver)
-        
+    # Solve exclusively using CPLEX
+    sol = mdl.solve(log_output=False)
     solve_duration = time.time() - start_time
-    status_str = pulp.LpStatus[prob.status]
     
-    if status_str != "Optimal":
+    if sol is None:
+        cplex_status = mdl.solve_details.status if mdl.solve_details else "Infeasible or Unbounded"
         return {
-            "status": status_str,
+            "status": f"CPLEX: {cplex_status}",
             "optimal": False,
             "objective_value": 0.0,
-            "errors": [f"Solver concluded with status: {status_str}. Check capacity and constraint settings."],
-            "solve_time": solve_duration
+            "errors": [f"IBM CPLEX concluded with status: {cplex_status}. Check capacity and constraint settings."],
+            "solve_time": solve_duration,
+            "solver_used": "IBM ILOG CPLEX Optimizer"
         }
 
-    # Extract Results
+    status_str = mdl.solve_details.status if mdl.solve_details else "Optimal"
+    cplex_solve_time = mdl.solve_details.time if mdl.solve_details and mdl.solve_details.time > 0 else solve_duration
+
+    # Extract Results from CPLEX Solution
     allocations = {}
     pm_assignments = {}
     assigned_flags = {}
@@ -217,9 +225,13 @@ def solve_consulting_allocation(
         allocations[j] = {}
         assigned_flags[j] = {}
         for i in consultants:
-            allocations[j][i] = round(float(pulp.value(x[(i, j)]) or 0.0), 2)
-            assigned_flags[j][i] = int(pulp.value(y[(i, j)]) or 0)
-            if pulp.value(p[(i, j)]) and pulp.value(p[(i, j)]) > 0.5:
+            x_val = float(sol.get_value(x[(i, j)]))
+            y_val = int(round(sol.get_value(y[(i, j)])))
+            p_val = float(sol.get_value(p[(i, j)]))
+            
+            allocations[j][i] = round(x_val, 2)
+            assigned_flags[j][i] = y_val
+            if p_val > 0.5:
                 pm_assignments[j] = i
                 
     # Build detailed allocation DataFrame
@@ -276,7 +288,7 @@ def solve_consulting_allocation(
         })
     utilization_df = pd.DataFrame(util_rows)
     
-    total_margin = float(pulp.value(prob.objective))
+    total_margin = float(sol.get_objective_value())
     total_revenue = allocation_df["Client_Revenue"].sum()
     total_cost = allocation_df["Client_Cost"].sum()
     overall_margin_pct = (total_margin / total_revenue * 100) if total_revenue > 0 else 0.0
@@ -292,6 +304,8 @@ def solve_consulting_allocation(
         "utilization_df": utilization_df,
         "allocations_dict": allocations,
         "pm_assignments": pm_assignments,
-        "solve_time": round(solve_duration, 4),
-        "solver_used": solver_name
+        "solve_time": round(cplex_solve_time, 4),
+        "solver_used": "IBM ILOG CPLEX Optimizer",
+        "cplex_status": status_str
     }
+

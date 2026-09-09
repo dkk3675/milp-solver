@@ -35,9 +35,9 @@ The application will launch automatically in your browser (typically at `http://
 
 ```
 ├── app.py              # Main Streamlit GUI with 5 interactive tabs and KPI dashboards
-├── solver.py           # MILP optimization engine (PuLP CBC, SciPy, Gurobi/CPLEX support)
+├── solver.py           # MILP optimization engine (Exclusively IBM ILOG CPLEX via docplex)
 ├── model_data.py       # Default benchmark parameters (Appendix A, B, C) and data structures
-├── requirements.txt    # Python package dependencies (Streamlit, PuLP, Pandas, Plotly)
+├── requirements.txt    # Python package dependencies (Streamlit, CPLEX, DOcplex, Pandas, Plotly)
 └── README.md           # Project documentation and mathematical formulation
 ```
 
